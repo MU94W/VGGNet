@@ -35,11 +35,16 @@ class modifiedVGG(Model):
         self.__opt = opt
         self.__start_lr = start_lr
         self.__log = tf.summary.FileWriter("log", sess.graph)
+        self.__save_path = "save"
         self.__name = name
 
     @property
     def log(self):
         return self.__log
+
+    @property
+    def save_path(self):
+        return self.__save_path
 
     @property
     def sess(self):
@@ -108,11 +113,11 @@ class modifiedVGG(Model):
             upd = self.__build_backprop(loss)
             self.__train_summary = self.__add_summary("train")
             self.__dev_summary = self.__add_summary("dev")
-            self.sess.run(tf.global_variable_initializer())
-            self.sess.run(tf.local_variable_initializer())
+            self.sess.run(tf.global_variables_initializer())
+            self.sess.run(tf.local_variables_initializer())
             return upd
 
-    def fit(self, train_data, dev_data, batch_size=32, epochs=20, summary_step=10):
+    def fit(self, train_data, dev_data, batch_size=32, epochs=20, summary_step=10, save_step=100):
         """
         """
         train_inp = train_data.get("input")
@@ -120,21 +125,26 @@ class modifiedVGG(Model):
         dev_inp = dev_data.get("input")
         dev_out = dev_data.get("output")
         samples = train_out.shape[0]
-        cnt = 1
         for epoch in range(epochs):
-            print("Epoch %d / %d" % (epoch, epochs))
+            print("Epoch %d / %d" % (epoch+1, epochs))
             perm = np.random.permutation(samples)
             start = 0
             end = start + batch_size
             while start < samples:
+                global_step = self.sess.run(self.global_step)
                 perm_index = perm[start:end]
                 feed_dict = {self.input: train_inp[perm_index],\
                         self.output: train_out[perm_index]}
-                if cnt % summary_step != 0:
+                if global_step % summary_step != 0:
                     self.train(min(end, samples), samples, feed_dict)
                 else:
                     self.train(min(end, samples), samples, feed_dict, True)
                     self.evaluate({self.input: dev_inp, self.output: dev_out})
+                if global_step % save_step == 0:
+                    print("Save model ...")
+                    self.save(self.save_path, global_step)
+                start = end
+                end = start + batch_size
             print("")
 
 
@@ -142,20 +152,20 @@ class modifiedVGG(Model):
         """
         """
         if not eval_summary:
-            loss, acc, _ = self.sess.run([self.loss, self.metric, self.upd], feed_dict)
+            loss, acc, _ = self.sess.run([self.loss, self.metric, self.update], feed_dict)
         else:
             loss, acc, summary, global_step, _ = self.sess.run([self.loss, self.metric, self.train_summary, \
-                    self.global_step, self.upd], feed_dict)
+                    self.global_step, self.update], feed_dict)
             self.log.add_summary(summary, global_step)
         ### show some useful info.
-        console_log = "\r[%d / %d]:\tloss: %f; accuracy: %f" % (loss, acc)
+        console_log = "\r[%d / %d]:\tloss: %f; accuracy: %f" % (used_samples_cnt, total_samples, loss, acc)
         print(console_log, end="")
 
     def evaluate(self, feed_dict):
-        loss, acc, summary, global_step, _ = self.sess.run([self.loss, self.metric, self.dev_summary, \
-                self.global_step, self.upd], feed_dict)
+        loss, acc, summary, global_step = self.sess.run([self.loss, self.metric, self.dev_summary, \
+                self.global_step], feed_dict)
         self.log.add_summary(summary, global_step)
-        console_log = "[dev]:\tloss: %f; accuracy: %f" % (loss, acc)
+        console_log = "\n[dev]:\tloss: %f; accuracy: %f" % (loss, acc)
         print(console_log)
         
 
