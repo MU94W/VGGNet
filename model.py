@@ -6,6 +6,7 @@ config_16 = {"input": (224, 224, 3),
         "conv_layers": [2, 2, 3, 3, 3],
         "conv_channels": [64, 128, 256, 512, 512],
         "dense_units": [4096, 4096, 1000],  # the last layer's units actually is 1.
+        "hash_codes": 48,
         "lambda_l1": 0.,
         "lambda_l2": 0.,}
 
@@ -27,16 +28,21 @@ class modifiedVGG(Model):
     """
     """
 
-    def __init__(self, sess, config=config_16, save_path="save", opt="adam", start_lr=0.05, name="modifiedVGG16"):
+    def __init__(self, sess, use_hash=True, config=config_16, save_path="save", opt="adam", start_lr=0.05, name="modifiedVGG16"):
         """
         """
         self.__sess = sess
+        self.__use_hash = use_hash
         self.__config = config
         self.__opt = opt
         self.__start_lr = start_lr
         self.__log = tf.summary.FileWriter("log", sess.graph)
         self.__save_path = save_path
         self.__name = name
+
+    @property
+    def use_hash(self):
+        return self.__use_hash
 
     @property
     def log(self):
@@ -135,17 +141,20 @@ class modifiedVGG(Model):
                 perm_index = perm[start:end]
                 feed_dict = {self.input: train_inp[perm_index],\
                         self.output: train_out[perm_index]}
-                if global_step % summary_step != 0:
+                if (global_step+1) % summary_step != 0:
                     self.train(min(end, samples), samples, feed_dict)
                 else:
                     self.train(min(end, samples), samples, feed_dict, True)
                     self.evaluate({self.input: dev_inp, self.output: dev_out})
-                if global_step % save_step == 0:
+                if (global_step+1) % save_step == 0:
                     print("Save model ...")
                     self.save(self.save_path, global_step)
                 start = end
                 end = start + batch_size
             print("")
+        global_step = self.sess.run(self.global_step)
+        print("Fit finish. Save model ...")
+        self.save(self.save_path, global_step)
 
 
     def train(self, used_samples_cnt, total_samples, feed_dict, eval_summary=False):
@@ -200,7 +209,15 @@ class modifiedVGG(Model):
                         this_out = tf.layers.dense(last_out, units, tf.nn.relu)
                         dense_hid_lst.append(this_out)
                         last_out = this_out
-                self.__dense_hid_lst = dense_hid_lst
+
+            if self.use_hash:
+                with tf.variable_scope("hash_layer"):
+                    units = self.config.get("hash_codes")
+                    this_out = tf.layers.dense(last_out, units, tf.sigmoid)
+                    dense_hid_lst.append(this_out)
+                    last_out = this_out
+
+            self.__dense_hid_lst = dense_hid_lst
 
             with tf.variable_scope("classification"):
                 logits = tf.layers.dense(last_out, 1, None)
