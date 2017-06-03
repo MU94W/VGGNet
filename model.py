@@ -24,11 +24,11 @@ def flatten_tensor(ts):
     return tf.reshape(ts, (batch_size, flat_dim))
 
 
-class modifiedVGG(Model):
+class hashVGG(Model):
     """
     """
 
-    def __init__(self, sess, use_hash=True, config=config_16, save_path="save", opt="adam", start_lr=0.05, name="modifiedVGG16"):
+    def __init__(self, sess, use_hash=True, config=config_16, save_path="save", opt="adam", start_lr=0.05, name="hashVGG16"):
         """
         """
         self.__sess = sess
