@@ -102,8 +102,14 @@ class hashVGG(Model):
 
     def __add_summary(self, suffix):
         sums = []
-        sums.append(tf.summary.scalar("%s/loss" % suffix, self.loss))
-        sums.append(tf.summary.scalar("%s/acc" % suffix, self.metric))
+        if suffix == "train":
+            sums.append(tf.summary.scalar("%s/loss" % suffix, self.loss))
+            sums.append(tf.summary.scalar("%s/acc" % suffix, self.metric))
+        elif suffix == "dev":
+            self.__loss_bottle = tf.Variable(0., name="loss_bottle", trainable=False)
+            self.__metric_bottle = tf.Variable(0., name="metric_bottle", trainable=False)
+            sums.append(tf.summary.scalar("%s/loss" % suffix, self.__loss_bottle))
+            sums.append(tf.summary.scalar("%s/acc" % suffix, self.__metric_bottle))
         return tf.summary.merge(sums)
 
     def build(self, scope=None):
@@ -117,13 +123,13 @@ class hashVGG(Model):
                         shape=(None, 1), dtype=tf.float32)
             loss = self.__build_forward(self.__inp, self.__out)
             upd = self.__build_backprop(loss)
-            self.__train_summary = self.__add_summary("train")
-            self.__dev_summary = self.__add_summary("dev")
             self.sess.run(tf.global_variables_initializer())
             self.sess.run(tf.local_variables_initializer())
-            return upd
+        self.__train_summary = self.__add_summary("train")
+        self.__dev_summary = self.__add_summary("dev")
+        return upd
 
-    def fit(self, train_data, dev_data, batch_size=32, epochs=20, summary_step=10, save_step=100):
+    def fit(self, train_data, dev_data, is_hdf5=True, batch_size=32, epochs=20, summary_step=50, save_step=100):
         """
         """
         train_inp = train_data.get("input")
@@ -139,13 +145,17 @@ class hashVGG(Model):
             while start < samples:
                 global_step = self.sess.run(self.global_step)
                 perm_index = perm[start:end]
+
+                if is_hdf5:
+                    perm_index = list(np.sort(perm_index))
+
                 feed_dict = {self.input: train_inp[perm_index],\
                         self.output: train_out[perm_index]}
                 if (global_step+1) % summary_step != 0:
                     self.train(min(end, samples), samples, feed_dict)
                 else:
                     self.train(min(end, samples), samples, feed_dict, True)
-                    self.evaluate({self.input: dev_inp, self.output: dev_out})
+                    self.evaluate(dev_data, batch_size, global_step)
                 if (global_step+1) % save_step == 0:
                     print("Save model ...")
                     self.save(self.save_path, global_step)
@@ -170,9 +180,31 @@ class hashVGG(Model):
         console_log = "\r[%d / %d]:\tloss: %f; accuracy: %f" % (used_samples_cnt, total_samples, loss, acc)
         print(console_log, end="")
 
-    def evaluate(self, feed_dict):
-        loss, acc, summary, global_step = self.sess.run([self.loss, self.metric, self.dev_summary, \
-                self.global_step], feed_dict)
+    def evaluate(self, dev_data, batch_size, global_step):
+        dev_inp = dev_data.get("input")
+        dev_out = dev_data.get("output")
+        loss_sum = 0.
+        acc_sum = 0.
+        start = 0
+        end = start + batch_size
+        dev_samples = dev_out.shape[0]
+        while start < dev_samples:
+            this_inp = dev_inp[start:end]
+            this_out = dev_out[start:end]
+            this_spl = this_out.shape[0]
+            loss, acc = self.sess.run([self.loss, self.metric], \
+                    {self.input: this_inp, self.output: this_out})
+            loss_sum += loss * this_spl
+            acc_sum += acc * this_spl
+            start = end
+            end = start + batch_size
+        loss = loss_sum / dev_samples
+        acc = acc_sum / dev_samples
+
+        sums = []
+        self.sess.run([self.__loss_bottle.assign(loss), self.__metric_bottle.assign(acc)])
+        summary = self.sess.run(self.dev_summary)
+
         self.log.add_summary(summary, global_step)
         console_log = "\n[dev]:\tloss: %f; accuracy: %f" % (loss, acc)
         print(console_log)
