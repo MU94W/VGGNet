@@ -27,7 +27,7 @@ class modifiedVGG(Model):
     """
     """
 
-    def __init__(self, sess, config=config_16, opt="adam", start_lr=0.05, name="modifiedVGG16"):
+    def __init__(self, sess, config=config_16, save_path="save", opt="adam", start_lr=0.05, name="modifiedVGG16"):
         """
         """
         self.__sess = sess
@@ -35,7 +35,7 @@ class modifiedVGG(Model):
         self.__opt = opt
         self.__start_lr = start_lr
         self.__log = tf.summary.FileWriter("log", sess.graph)
-        self.__save_path = "save"
+        self.__save_path = save_path
         self.__name = name
 
     @property
