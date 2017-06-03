@@ -1,11 +1,11 @@
-import tensorflow as tf
+import tensorflow as tf, numpy as np
 from TFCommon.Model import Model
 from TFCommon.metrics import binary_accuracy
 
 config_16 = {"input": (224, 224, 3),
         "conv_layers": [2, 2, 3, 3, 3],
         "conv_channels": [64, 128, 256, 512, 512],
-        "dense_units": [4096, 4096, 1000],
+        "dense_units": [4096, 4096, 1000],  # the last layer's units actually is 1.
         "lambda_l1": 0.,
         "lambda_l2": 0.,}
 
@@ -23,15 +23,27 @@ def flatten_tensor(ts):
     return tf.reshape(ts, (batch_size, flat_dim))
 
 
-class VGG(Model):
+class modifiedVGG(Model):
     """
     """
 
-    def __init__(self, config=config_16, name="VGG16"):
+    def __init__(self, sess, config=config_16, opt="adam", start_lr=0.05, name="modifiedVGG16"):
         """
         """
+        self.__sess = sess
         self.__config = config
+        self.__opt = opt
+        self.__start_lr = start_lr
+        self.__log = tf.summary.FileWriter("log", sess.graph)
         self.__name = name
+
+    @property
+    def log(self):
+        return self.__log
+
+    @property
+    def sess(self):
+        return self.__sess
 
     @property
     def config(self):
@@ -65,6 +77,24 @@ class VGG(Model):
     def output(self):
         return self.__out
 
+    @property
+    def global_step(self):
+        return self.__global_step
+
+    @property
+    def train_summary(self):
+        return self.__train_summary
+
+    @property
+    def dev_summary(self):
+        return self.__dev_summary
+
+    def __add_summary(self, suffix):
+        sums = []
+        sums.append(tf.summary.scalar("%s/loss" % suffix, self.loss))
+        sums.append(tf.summary.scalar("%s/acc" % suffix, self.metric))
+        return tf.summary.merge(sums)
+
     def build(self, scope=None):
         """
         """
@@ -76,8 +106,58 @@ class VGG(Model):
                         shape=(None, 1), dtype=tf.float32)
             loss = self.__build_forward(self.__inp, self.__out)
             upd = self.__build_backprop(loss)
+            self.__train_summary = self.__add_summary("train")
+            self.__dev_summary = self.__add_summary("dev")
+            self.sess.run(tf.global_variable_initializer())
+            self.sess.run(tf.local_variable_initializer())
             return upd
 
+    def fit(self, train_data, dev_data, batch_size=32, epochs=20, summary_step=10):
+        """
+        """
+        train_inp = train_data.get("input")
+        train_out = train_data.get("output")
+        dev_inp = dev_data.get("input")
+        dev_out = dev_data.get("output")
+        samples = train_out.shape[0]
+        cnt = 1
+        for epoch in range(epochs):
+            print("Epoch %d / %d" % (epoch, epochs))
+            perm = np.random.permutation(samples)
+            start = 0
+            end = start + batch_size
+            while start < samples:
+                perm_index = perm[start:end]
+                feed_dict = {self.input: train_inp[perm_index],\
+                        self.output: train_out[perm_index]}
+                if cnt % summary_step != 0:
+                    self.train(min(end, samples), samples, feed_dict)
+                else:
+                    self.train(min(end, samples), samples, feed_dict, True)
+                    self.evaluate({self.input: dev_inp, self.output: dev_out})
+            print("")
+
+
+    def train(self, used_samples_cnt, total_samples, feed_dict, eval_summary=False):
+        """
+        """
+        if not eval_summary:
+            loss, acc, _ = self.sess.run([self.loss, self.metric, self.upd], feed_dict)
+        else:
+            loss, acc, summary, global_step, _ = self.sess.run([self.loss, self.metric, self.train_summary, \
+                    self.global_step, self.upd], feed_dict)
+            self.log.add_summary(summary, global_step)
+        ### show some useful info.
+        console_log = "\r[%d / %d]:\tloss: %f; accuracy: %f" % (loss, acc)
+        print(console_log, end="")
+
+    def evaluate(self, feed_dict):
+        loss, acc, summary, global_step, _ = self.sess.run([self.loss, self.metric, self.dev_summary, \
+                self.global_step, self.upd], feed_dict)
+        self.log.add_summary(summary, global_step)
+        console_log = "[dev]:\tloss: %f; accuracy: %f" % (loss, acc)
+        print(console_log)
+        
 
     def __build_forward(self, inp, out, scope=None):
         """
@@ -117,7 +197,7 @@ class VGG(Model):
 
             self.__predict = tf.sigmoid(logits)
 
-            loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=out, logits=logits)
+            loss = tf.losses.sigmoid_cross_entropy(out, logits)
             metric = binary_accuracy(out, self.__predict)
             train_vars = tf.trainable_variables()
             lambda_l1 = self.config.get("lambda_l1")
@@ -135,12 +215,15 @@ class VGG(Model):
         """
         """
         with tf.variable_scope(scope or "backprop"):
-            l_rate = tf.Variable(0.01, name="learning_rate", trainable=False)
+            l_rate = tf.Variable(self.__start_lr, name="learning_rate", trainable=False)
             global_step = tf.Variable(0, name="global_step", trainable=False)
-            opt = tf.train.AdamOptimizer()
-            #opt = tf.train.GradientDescentOptimizer(l_rate)
+            if self.__opt == "adam":
+                opt = tf.train.AdamOptimizer()
+            elif self.__opt == "sgd":
+                opt = tf.train.GradientDescentOptimizer(l_rate)
             upd = opt.minimize(loss, global_step=global_step)
-            
+
+            self.__global_step = global_step
             self.__upd = upd
             return upd
 
