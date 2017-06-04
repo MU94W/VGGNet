@@ -8,7 +8,7 @@ config_16 = {"input": (224, 224, 3),
         "dense_units": [4096, 4096, 1000],  # the last layer's units actually is 1.
         "hash_codes": 48,
         "lambda_l1": 0.,
-        "lambda_l2": 0.,}
+        "lambda_l2": 5e-4,}
 
 def flatten_tensor(ts):
     """
@@ -28,14 +28,16 @@ class hashVGG(Model):
     """
     """
 
-    def __init__(self, sess, use_hash=True, config=config_16, save_path="save", opt="adam", start_lr=0.05, name="hashVGG16"):
+    def __init__(self, sess, use_hash=True, dropout=0., config=config_16, save_path="save", opt="sgd", start_lr=0.05, decay=1e-3, name="hashVGG16"):
         """
         """
         self.__sess = sess
         self.__use_hash = use_hash
+        self.__dropout = dropout
         self.__config = config
         self.__opt = opt
         self.__start_lr = start_lr
+        self.__decay = 1 - decay
         self.__log = tf.summary.FileWriter("log", sess.graph)
         self.__save_path = save_path
         self.__name = name
@@ -121,6 +123,7 @@ class hashVGG(Model):
                         shape=(None,) + self.config.get("input"), dtype=tf.float32)
                 self.__out = tf.placeholder(name="out", \
                         shape=(None, 1), dtype=tf.float32)
+            self.__dropout_var = tf.Variable(self.__dropout, name="dropout", trainable=False)
             loss = self.__build_forward(self.__inp, self.__out)
             upd = self.__build_backprop(loss)
             self.sess.run(tf.global_variables_initializer())
@@ -129,7 +132,7 @@ class hashVGG(Model):
         self.__dev_summary = self.__add_summary("dev")
         return upd
 
-    def fit(self, train_data, dev_data, is_hdf5=True, batch_size=32, epochs=20, summary_step=50, save_step=100):
+    def fit(self, train_data, dev_data, is_hdf5=True, batch_size=64, epochs=20, summary_step=50, save_step=150):
         """
         """
         train_inp = train_data.get("input")
@@ -156,7 +159,7 @@ class hashVGG(Model):
                 else:
                     self.train(min(end, samples), samples, feed_dict, True)
                     self.evaluate(dev_data, batch_size, global_step)
-                if (global_step+1) % save_step == 0:
+                #if (global_step+1) % save_step == 0:
                     print("Save model ...")
                     self.save(self.save_path, global_step)
                 start = end
@@ -165,7 +168,6 @@ class hashVGG(Model):
         global_step = self.sess.run(self.global_step)
         print("Fit finish. Save model ...")
         self.save(self.save_path, global_step)
-
 
     def train(self, used_samples_cnt, total_samples, feed_dict, eval_summary=False):
         """
@@ -176,11 +178,12 @@ class hashVGG(Model):
             loss, acc, summary, global_step, _ = self.sess.run([self.loss, self.metric, self.train_summary, \
                     self.global_step, self.update], feed_dict)
             self.log.add_summary(summary, global_step)
+        self.sess.run(self.__l_rate_decay_op)   # decay after each batch feeded.
         ### show some useful info.
         console_log = "\r[%d / %d]:\tloss: %f; accuracy: %f" % (used_samples_cnt, total_samples, loss, acc)
         print(console_log, end="")
 
-    def evaluate(self, dev_data, batch_size, global_step):
+    def evaluate(self, dev_data, batch_size, global_step, add_sum=True):
         dev_inp = dev_data.get("input")
         dev_out = dev_data.get("output")
         loss_sum = 0.
@@ -188,12 +191,18 @@ class hashVGG(Model):
         start = 0
         end = start + batch_size
         dev_samples = dev_out.shape[0]
+        feats = []
         while start < dev_samples:
             this_inp = dev_inp[start:end]
             this_out = dev_out[start:end]
             this_spl = this_out.shape[0]
-            loss, acc = self.sess.run([self.loss, self.metric], \
-                    {self.input: this_inp, self.output: this_out})
+            if not add_sum:
+                loss, acc, feat_eval = self.sess.run([self.loss, self.metric, self.dense_hid_lst], \
+                        {self.input: this_inp, self.output: this_out})
+                feats.append(feat_eval)
+            else:
+                loss, acc = self.sess.run([self.loss, self.metric], \
+                        {self.input: this_inp, self.output: this_out})
             loss_sum += loss * this_spl
             acc_sum += acc * this_spl
             start = end
@@ -201,14 +210,17 @@ class hashVGG(Model):
         loss = loss_sum / dev_samples
         acc = acc_sum / dev_samples
 
-        sums = []
-        self.sess.run([self.__loss_bottle.assign(loss), self.__metric_bottle.assign(acc)])
-        summary = self.sess.run(self.dev_summary)
-
-        self.log.add_summary(summary, global_step)
         console_log = "\n[dev]:\tloss: %f; accuracy: %f" % (loss, acc)
         print(console_log)
-        
+
+        if add_sum:
+            sums = []
+            self.sess.run([self.__loss_bottle.assign(loss), self.__metric_bottle.assign(acc)])
+            summary = self.sess.run(self.dev_summary)
+            self.log.add_summary(summary, global_step)
+        else:
+            return feats
+
 
     def __build_forward(self, inp, out, scope=None):
         """
@@ -239,6 +251,8 @@ class hashVGG(Model):
                     with tf.variable_scope("lay_%d" % lay_idx):
                         units = layers[lay_idx]
                         this_out = tf.layers.dense(last_out, units, tf.nn.relu)
+                        if self.__dropout != 0.:
+                            this_out = tf.layers.dropout(this_out, self.__dropout_var)
                         dense_hid_lst.append(this_out)
                         last_out = this_out
 
@@ -270,16 +284,20 @@ class hashVGG(Model):
             self.__metric = metric
             return loss
 
+    def reset_lr(self):
+        self.sess.run(self.l_rate.assign(self.__start_lr))
+
     def __build_backprop(self, loss, scope=None):
         """
         """
         with tf.variable_scope(scope or "backprop"):
-            l_rate = tf.Variable(self.__start_lr, name="learning_rate", trainable=False)
+            self.l_rate = tf.Variable(self.__start_lr, name="learning_rate", trainable=False)
+            self.__l_rate_decay_op = self.l_rate.assign(self.l_rate * self.__decay)
             global_step = tf.Variable(0, name="global_step", trainable=False)
             if self.__opt == "adam":
                 opt = tf.train.AdamOptimizer()
             elif self.__opt == "sgd":
-                opt = tf.train.GradientDescentOptimizer(l_rate)
+                opt = tf.train.GradientDescentOptimizer(self.l_rate)
             upd = opt.minimize(loss, global_step=global_step)
 
             self.__global_step = global_step
